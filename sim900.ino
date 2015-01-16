@@ -1,12 +1,19 @@
 #include <SoftwareSerial.h>
 #include <EEPROM.h>
 
+#include <LiquidCrystal.h>
+ 
+LiquidCrystal lcd(4, 5, 10, 11, 12, 13);
 
+
+byte hasRTC=1;   // do we have RTC?
+String std_del=" \r\n\t"; // std delimiters
 String phoneCmd; // commandPhone
+
 
 SoftwareSerial gprsSerial(7, 8);
 int bOK, bERROR;
-String OutBuf;
+String OutBuf,OutFilter;
 int modemRun(int msec); // returns >0 if OK detected, -1 on ERRORS
 
 void out(String t) {
@@ -43,6 +50,30 @@ modemRun(5000);
 return bOK>0;
 }
 
+int getInt(String &s) {
+char arr[10]; 
+get_word2(s," /\",:").toCharArray(arr,9); arr[9]=0;
+return atoi((char*)arr);
+}
+
+String Int2(int D) { String r=String(D); if (r.length()==1) r="0"+r; return r;}
+
+byte Day,Month,Year,Hour,Min,Sec;
+  
+
+int modemDate() { // ReadDateTime info
+int ok;
+OutBuf=""; OutFilter="+CCLK:";
+ok = modemAt("+cclk?");
+if (ok>0) {
+     Year=getInt(OutBuf); Month=getInt(OutBuf); Day=getInt(OutBuf);
+     Hour=getInt(OutBuf); Min=getInt(OutBuf);   Sec=getInt(OutBuf); 
+       out(" Time: "+Int2(Hour)+":"+Int2(Min)+":"+Int2(Sec)+"  "+Int2(Day)+"."+Int2(Month)+".20"+Int2(Year));
+     }
+OutBuf=0; OutFilter="";
+return ok;
+}
+
 int checkReady2() {
 if (modemAt("")>0) ready=1;
 return ready;
@@ -70,6 +101,8 @@ return res;
 void setup()  {
      gprsSerial.begin(9600);
      Serial.begin(9600);
+     
+     lcd.begin(20, 4);
      
      checkReady2();
      if (!ready) modemReset();
@@ -106,47 +139,56 @@ if (bOK>0) return 1;
 return 0;
 }
 
-void ltrim(String &buf) {
-while(1) { // ltrim
-    if (buf.indexOf(" ")==0) buf=buf.substring(1);
-    else if (buf.indexOf("\t")==0) buf.substring(1);
-    else if (buf.indexOf("\r")==0) buf.substring(1);
-    else if (buf.indexOf("\n")==0) buf.substring(1);
-    else break;
+
+
+void ltrim2(String &buf,String del) {
+while(buf.length()>0) { // ltrim
+    char ch=buf.charAt(0);
+    if (del.indexOf(ch)>=0) buf=buf.substring(1);
+      else break;
     }  
 }
 
+void ltrim(String &buf) { return ltrim2(buf,std_del); }
+
 int lcmp(String &buf,String name) {
-ltrim(buf);
+ ltrim(buf);
 if (buf.indexOf(name)==0) {
      buf=buf.substring(name.length());
      ltrim(buf);
      return 1;
      }
+     
 return 0;
 } 
 
-String get_word(String &buf) {
-ltrim(buf); int i;
+
+String get_word2(String &buf,String del) {
+ltrim2(buf,del); int i;
 for(i=0;i<buf.length();i++) {
    char ch=buf.charAt(i);
-   if ((ch == ' ' || ch =='\t' || ch == '\r' || ch == '\t')) break;
+   if (del.indexOf(ch)>=0) break; // delimiter
    }
 String res=buf.substring(0,i);
 buf=buf.substring(i);
-ltrim(buf);
+ltrim2(buf,del);
 return res;   
 }
+String get_word(String &buf) { return get_word2(buf,std_del); }
 
     
 void pushStr(String cmd) {
-//Serial.println("CMD=<"+cmd+">");
+ //Serial.println("CMD=<"+cmd+">"); 
 if (lcmp(cmd,"test")) {
   out(" test command here:"+cmd);
   if (lcmp(cmd,"sms")) {
      sendSMS(phoneCmd,"Just a test");
      }
   return;
+  }
+if (lcmp(cmd,"date")) {
+  modemDate();
+  return ;
   }
 if (lcmp(cmd,"phoneCmd")) {
   phoneCmd=cmd;
@@ -165,7 +207,7 @@ else gprsSerial.println(cmd);
 }
     
     
-String line;
+String line="";
 void pushIn(char in) { // push input char for processing
 int code = in;
 //static String line;
@@ -183,9 +225,11 @@ String smsSender="";
 
 void onNewSms(String phone,String Text) {
 out("smsCommandHere:{"+Text+"} from {"+phone+"}"); // skip?
+lcd.setCursor(0,1); lcd.print(Text+"  from:"+phone);
 }
 
 void pushOutStr(String str) {
+String s=str;
 if (str == "OK") bOK++;
 else if (str == "ERROR") bERROR++;
  else if (lcmp(str,"+CMT:")) { // new incoming SMS
@@ -199,7 +243,10 @@ else if (str == "ERROR") bERROR++;
    fSMS=0;
    onNewSms(smsSender,str);
    }
- else OutBuf+=str; // just collect
+ else if (lcmp(s,OutFilter)) {
+    if (OutBuf.length()>0) OutBuf=OutBuf+"\n";
+    OutBuf+=s; // just collect in OutFIlter
+    }
 Serial.println("<"+str+">");
 }
 
@@ -222,7 +269,7 @@ while(msec>=0) {
         if (gprsSerial.available()) {
             char currSymb = gprsSerial.read();
             pushOut(currSymb);
-            //Serial.print(currSymb);
+            Serial.print(currSymb);
             }
    delay(1); msec--;
    if (bOK) return 1;
@@ -232,10 +279,23 @@ return 0;
 }
 
 
+void everySecond() {
+modemDate();
+ String t=Int2(Hour)+":"+Int2(Min)+":"+Int2(Sec)+"  "+Int2(Day)+"."+Int2(Month)+".20"+Int2(Year);
+ lcd.setCursor(0,0); lcd.print(t);
+}
 
+int code=0;
 void loop() {
+ 
         modemRun(0);
         if (Serial.available()) pushIn( Serial.read() );
+        delay(10); code++;
+        if (code>800) {
+           code=0;
+           everySecond();
+           }
         
+       
 }
 
